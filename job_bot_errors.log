@@ -55,3 +55,22 @@ HTML dump saved to: html dump failed: Event loop is closed! Is Playwright alread
 --- END ERROR ---
 
 --- END ERROR ---
+
+
+--- ERROR OCCURRED AT 2025-07-26 23:01:19 UTC ---
+
+--- ERROR OCCURRED AT 2025-07-26T23:01:19.726807 UTC ---
+Exception:
+Traceback (most recent call last):
+  File "/home/ubuntu/Dom/job_bot.py", line 130, in scrape_indeed_jobs_pw
+    raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
+RuntimeError: Blocked by Captcha or Bot detection on Indeed page
+
+
+Current URL: https://uk.indeed.com/jobs?q=part%20time&l=Leigh,%20WN7%201NX&radius=5&jt=parttime
+Screenshot saved to: screenshot failed: Event loop is closed! Is Playwright already stopped?
+HTML dump saved to: html dump failed: Event loop is closed! Is Playwright already stopped?
+
+--- END ERROR ---
+
+--- END ERROR ---
