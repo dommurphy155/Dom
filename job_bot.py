@@ -116,7 +116,6 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
     import traceback
     from time import sleep
     from random import uniform, choice
-    from playwright_stealth import stealth_sync
 
     selectors = [
         'a.tapItem',
@@ -173,7 +172,7 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                 page = context.new_page()
 
                 # Apply stealth plugin
-                stealth_sync(page)
+                apply_stealth_sync(page)
 
                 # Extra low-level navigator overrides to harden stealth
                 page.add_init_script("""
