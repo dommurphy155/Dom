@@ -6,10 +6,12 @@ import logging
 import sqlite3
 import random
 import json
+import traceback
 from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+import subprocess
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -21,6 +23,7 @@ JOBS_TO_SCRAPE = 33
 JOBS_TO_SEND = 8
 DB_PATH = "jobs_sent.db"
 POLL_INTERVAL = 3
+ERROR_LOG_FILE = "job_bot_errors.log"
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set.")
@@ -66,6 +69,22 @@ def load_playwright_cookies():
         })
     return sanitized
 
+def write_error_log(error_details):
+    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(f"\n\n--- ERROR OCCURRED AT {timestamp} ---\n")
+        f.write(error_details)
+        f.write("\n--- END ERROR ---\n")
+
+def git_commit_and_push():
+    try:
+        subprocess.run(["git", "add", ERROR_LOG_FILE], check=True)
+        subprocess.run(["git", "commit", "-m", "Auto commit: logged job_bot error"], check=True)
+        subprocess.run(["git", "push"], check=True)
+        log.info("Error log committed and pushed to GitHub successfully.")
+    except subprocess.CalledProcessError as e:
+        log.error(f"Git commit/push failed: {e}")
+
 def scrape_indeed_jobs_pw(query, location, cookies, max_results):
     jobs = []
     url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
@@ -74,22 +93,51 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results):
         context = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
         )
-        if cookies:
-            context.add_cookies(cookies)
-        page = context.new_page()
-        page.goto(url, timeout=30000)
-        page.wait_for_selector('a.tapItem', timeout=15000)
-        els = page.query_selector_all('a.tapItem')
-        for el in els:
-            if len(jobs) >= max_results:
-                break
-            jk = el.get_attribute('data-jk')
-            title_el = el.query_selector('h2.jobTitle span')
-            title = title_el.inner_text().strip() if title_el else "Job"
-            jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
-        browser.close()
-    log.info("Scraped %d jobs via Playwright", len(jobs))
-    return jobs
+        try:
+            if cookies:
+                context.add_cookies(cookies)
+            page = context.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_selector('a.tapItem', timeout=15000)
+            els = page.query_selector_all('a.tapItem')
+            for el in els:
+                if len(jobs) >= max_results:
+                    break
+                jk = el.get_attribute('data-jk')
+                title_el = el.query_selector('h2.jobTitle span')
+                title = title_el.inner_text().strip() if title_el else "Job"
+                jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
+            browser.close()
+            log.info("Scraped %d jobs via Playwright", len(jobs))
+            return jobs
+        except Exception as e:
+            # Gather error info
+            error_trace = traceback.format_exc()
+            current_url = page.url if 'page' in locals() else "N/A"
+            try:
+                screenshot_path = "error_screenshot.png"
+                page.screenshot(path=screenshot_path)
+            except Exception as se:
+                screenshot_path = f"screenshot failed: {se}"
+            try:
+                html_content = page.content()
+                html_path = "error_page.html"
+                with open(html_path, "w", encoding="utf-8") as f:
+                    f.write(html_content)
+            except Exception as he:
+                html_path = f"html dump failed: {he}"
+
+            error_details = (
+                f"Exception:\n{error_trace}\n\n"
+                f"Current URL: {current_url}\n"
+                f"Screenshot saved to: {screenshot_path}\n"
+                f"HTML dump saved to: {html_path}\n"
+            )
+            write_error_log(error_details)
+            git_commit_and_push()
+            log.error("Error during scraping. Details saved and pushed. Exiting.")
+            browser.close()
+            sys.exit(1)
 
 def send_telegram_message(token, chat_id, text):
     import requests
@@ -155,7 +203,7 @@ def main():
         try:
             import requests
             resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20, "offset":offset}, timeout=25).json()
-        except Exception as e:
+        except Exception:
             time.sleep(POLL_INTERVAL)
             continue
         if resp.get("ok"):
@@ -167,4 +215,4 @@ def main():
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
-    main( )
+    main()
