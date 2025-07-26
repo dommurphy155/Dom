@@ -6,6 +6,7 @@ import sqlite3
 import random
 import requests
 from datetime import datetime, timedelta
+from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
