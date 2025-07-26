@@ -12,6 +12,7 @@ from typing import Optional
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
 import subprocess
+from stealth import apply_stealth_sync
 
 load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
