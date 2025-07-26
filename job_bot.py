@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Optional
 from dotenv import load_dotenv
 from playwright.sync_api import sync_playwright
+from playwright_stealth import add_stealth
 import subprocess
 
 load_dotenv()
@@ -55,7 +56,7 @@ def load_playwright_cookies():
     sanitized = []
     for c in cookies:
         same_site = c.get("sameSite", "Lax")
-        if same_site not in ["Strict", "Lax", "None"]:
+        if same_site not in ("Strict", "Lax", "None"):
             same_site = "Lax"
         sanitized.append({
             "name": c["name"],
@@ -65,13 +66,13 @@ def load_playwright_cookies():
             "httpOnly": c.get("httpOnly", False),
             "secure": c.get("secure", False),
             "sameSite": same_site,
-            "expires": int(c.get("expirationDate", 0))
+            "expires": int(c.get("expirationDate", 0)),
         })
     return sanitized
 
 def write_error_log(error_details):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
+    timestamp = datetime.utcnow().strftime("%Y‑%m‑%d %H:%M:%S UTC")
+    with open(ERROR_LOG_FILE, "a", encoding="utf‑8") as f:
         f.write(f"\n\n--- ERROR OCCURRED AT {timestamp} ---\n")
         f.write(error_details)
         f.write("\n--- END ERROR ---\n")
@@ -81,42 +82,35 @@ def git_commit_and_push():
         subprocess.run(["git", "add", ERROR_LOG_FILE], check=True)
         subprocess.run(["git", "commit", "-m", "Auto commit: logged job_bot error"], check=True)
         subprocess.run(["git", "push"], check=True)
-        log.info("Error log committed and pushed to GitHub successfully.")
+        log.info("Error log committed and pushed to GitHub.")
     except subprocess.CalledProcessError as e:
         log.error(f"Git commit/push failed: {e}")
 
 def human_like_interactions(page):
-    import random
     import time
-    # Random mouse moves
-    for _ in range(random.randint(5, 10)):
-        x = random.randint(100, 1000)
-        y = random.randint(100, 700)
+    for _ in range(random.randint(5,10)):
+        x = random.randint(100,1000)
+        y = random.randint(100,700)
         page.mouse.move(x, y)
-        time.sleep(random.uniform(0.1, 0.3))
-    # Scroll down slowly in steps
+        time.sleep(random.uniform(0.1,0.3))
     viewport_height = page.evaluate("window.innerHeight")
-    for i in range(1, 4):
+    for i in range(1,4):
         page.evaluate(f"window.scrollTo(0, {viewport_height * i / 4})")
-        time.sleep(random.uniform(0.5, 1.2))
-    # Random small scroll ups/downs
+        time.sleep(random.uniform(0.5,1.2))
     for _ in range(random.randint(1,3)):
-        delta = random.randint(-100, 100)
+        delta = random.randint(-100,100)
         page.evaluate(f"window.scrollBy(0, {delta})")
-        time.sleep(random.uniform(0.2, 0.6))
-    # Small random click somewhere (avoid navigation)
+        time.sleep(random.uniform(0.2,0.6))
     box = page.viewport_size
     if box:
-        x = random.randint(50, box["width"] - 50)
-        y = random.randint(50, box["height"] - 50)
+        x = random.randint(50,box["width"]-50)
+        y = random.randint(50,box["height"]-50)
         page.mouse.click(x, y)
-        time.sleep(random.uniform(0.3, 0.7))
+        time.sleep(random.uniform(0.3,0.7))
 
 def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
-    import traceback
     from time import sleep
     from random import uniform, choice
-    from playwright_stealth import stealth_sync
 
     selectors = [
         'a.tapItem',
@@ -125,142 +119,108 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
         'a[aria-label*="Job"]',
         'a[data-testid="jobTitle"]',
         'a[href*="/rc/clk?"]',
-        'a.jobtitle',  # legacy fallback
+        'a.jobtitle',
     ]
     base_url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
-
     user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64)... Chrome/115.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X... Safari/16.1)",
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:115.0)... Firefox/115.0",
     ]
 
-    for attempt in range(1, max_retries + 1):
+    for attempt in range(1, max_retries+1):
         jobs = []
         browser = None
         context = None
         page = None
         try:
             with sync_playwright() as p:
-                # Run headless=False to evade detection better
                 browser = p.chromium.launch(
                     headless=False,
                     args=[
                         '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
+                        '--no-sandbox', '--disable-setuid-sandbox',
                         '--disable-dev-shm-usage',
-                        '--disable-extensions',
-                        '--disable-gpu',
+                        '--disable-extensions', '--disable-gpu'
                     ]
                 )
-
                 context = browser.new_context(
                     user_agent=choice(user_agents),
-                    viewport={"width": 1280, "height": 800},
+                    viewport={"width":1280,"height":800},
                     java_script_enabled=True,
                     bypass_csp=True,
                     locale="en-GB",
                     timezone_id="Europe/London",
                     device_scale_factor=1,
                     is_mobile=False,
-                    permissions=[],
                 )
-
                 if cookies:
                     context.add_cookies(cookies)
 
                 page = context.new_page()
-
-                # Apply stealth plugin
-                stealth_sync(page)
-
-                # Extra low-level navigator overrides to harden stealth
+                add_stealth(page)
                 page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     window.chrome = { runtime: {} };
-                    Object.defineProperty(navigator, 'languages', {get: () => ['en-GB', 'en']});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-GB','en']});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3,4,5]});
                 """)
-
                 page.goto(base_url, timeout=30000)
-
-                # Simulate human-like browsing activity to avoid detection
                 human_like_interactions(page)
+                sleep(uniform(2,4))
 
-                # Wait a bit more for dynamic content to settle
-                sleep(uniform(2, 4))
-
-                # Detect captcha or bot block intelligently
                 content_lower = page.content().lower()
                 captcha_detected = any([
-                    "captcha" in content_lower,
-                    "verify you're human" in content_lower,
+                    "captcha" in content_lower, "verify you're human" in content_lower,
                     "recaptcha" in content_lower,
-                    page.locator("input#captcha").count() > 0,
-                    page.locator("div.g-recaptcha").count() > 0,
-                    page.locator("iframe[src*='captcha']").count() > 0,
-                    page.locator("div#captcha").count() > 0,
+                    page.locator("input#captcha").count()>0,
+                    page.locator("div.g-recaptcha").count()>0,
+                    page.locator("iframe[src*='captcha']").count()>0,
+                    page.locator("div#captcha").count()>0,
                 ])
                 if captcha_detected:
-                    # Do not retry blindly, escalate / pause
                     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
                     screenshot_path = f"captcha_screenshot_{now}.png"
                     html_path = f"captcha_page_{now}.html"
                     try:
                         page.screenshot(path=screenshot_path)
-                    except Exception as se:
-                        log.error(f"Captcha screenshot failed: {se}")
+                    except Exception:
                         screenshot_path = "captcha screenshot failed"
                     try:
-                        html_content = page.content()
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(html_content)
-                    except Exception as he:
-                        log.error(f"Captcha HTML dump failed: {he}")
+                        with open(html_path,"w",encoding="utf‑8") as f:
+                            f.write(page.content())
+                    except Exception:
                         html_path = "captcha html dump failed"
-                    log.error(f"Captcha detected. Screenshot saved: {screenshot_path}, HTML saved: {html_path}")
-                    raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
+                    log.error(f"Captcha detected. Screenshot: {screenshot_path}, HTML: {html_path}")
+                    raise RuntimeError("Blocked by Captcha or Bot detection")
 
-                found_selector = None
+                found = None
                 for sel in selectors:
                     try:
                         page.wait_for_selector(sel, timeout=10000)
-                        found_selector = sel
+                        found = sel
                         break
-                    except Exception:
+                    except:
                         continue
-
-                if not found_selector:
+                if not found:
                     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
                     screenshot_path = f"error_screenshot_{now}.png"
                     html_path = f"error_page_{now}.html"
+                    try: page.screenshot(path=screenshot_path)
+                    except: screenshot_path = "screenshot failed"
                     try:
-                        page.screenshot(path=screenshot_path)
-                    except Exception as se:
-                        log.error(f"Screenshot failed: {se}")
-                        screenshot_path = "screenshot failed"
-                    try:
-                        html_content = page.content()
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(html_content)
-                    except Exception as he:
-                        log.error(f"HTML dump failed: {he}")
-                        html_path = "html dump failed"
-                    current_url = page.url if page else base_url
-                    raise TimeoutError(
-                        f"None of the selectors {selectors} found on page. "
-                        f"Screenshot saved to: {screenshot_path}, HTML saved to: {html_path}"
-                    )
+                        with open(html_path,"w",encoding="utf‑8") as f:
+                            f.write(page.content())
+                    except: html_path = "html dump failed"
+                    raise TimeoutError(f"No known selector found. Screenshot: {screenshot_path}, HTML: {html_path}")
 
-                els = page.query_selector_all(found_selector)
+                els = page.query_selector_all(found)
                 for el in els:
-                    if len(jobs) >= max_results:
-                        break
-                    jk = el.get_attribute('data-jk')
+                    if len(jobs)>=max_results: break
+                    jk = el.get_attribute('data‑jk') or ""
                     if not jk:
-                        href = el.get_attribute('href')
-                        if href and 'jk=' in href:
+                        href = el.get_attribute('href') or ""
+                        if 'jk=' in href:
                             jk = href.split('jk=')[1].split('&')[0]
                         else:
                             continue
@@ -268,69 +228,39 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                     title = title_el.inner_text().strip() if title_el else "Job"
                     jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
 
-                # Correctly close browser AFTER screenshot/html dump and parsing done
                 browser.close()
-                log.info(f"Scraped {len(jobs)} jobs via Playwright on attempt {attempt}")
+                log.info(f"Scraped {len(jobs)} jobs on attempt {attempt}")
                 return jobs
 
         except Exception as e:
             now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             screenshot_path = f"error_screenshot_{now}.png"
             html_path = f"error_page_{now}.html"
-            current_url = base_url
-
-            # Screenshot and HTML dump BEFORE closing browser
+            try: 
+                if page: page.screenshot(path=screenshot_path)
+                else: screenshot_path="no page"
+            except: screenshot_path="screenshot failed"
             try:
                 if page:
-                    page.screenshot(path=screenshot_path)
+                    with open(html_path,"w",encoding="utf‑8") as f:
+                        f.write(page.content())
                 else:
-                    screenshot_path = "no page to screenshot"
-            except Exception as se:
-                screenshot_path = f"screenshot failed: {se}"
-
-            try:
-                if page:
-                    html_content = page.content()
-                    with open(html_path, "w", encoding="utf-8") as f:
-                        f.write(html_content)
-                else:
-                    html_path = "no page to dump html"
-            except Exception as he:
-                html_path = f"html dump failed: {he}"
-
-            if page and page.url:
-                current_url = page.url
-
+                    html_path="no page"
+            except: html_path="html dump failed"
             tb = traceback.format_exc()
-            err_msg = f"""
---- ERROR OCCURRED AT {datetime.utcnow().isoformat()} UTC ---
-Exception:
-{tb}
-
-Current URL: {current_url}
-Screenshot saved to: {screenshot_path}
-HTML dump saved to: {html_path}
-
---- END ERROR ---
-"""
+            err_msg = f"\n--- ERROR AT {datetime.utcnow().isoformat()} UTC ---\nException:\n{tb}\nURL: {page.url if page else base_url}\nScreenshot: {screenshot_path}\nHTML: {html_path}\n--- END ERROR ---"
             write_error_log(err_msg)
             git_commit_and_push()
-            log.error(f"Error scraping jobs on attempt {attempt}: {e}")
-
+            log.error(f"Attempt {attempt} failed: {e}")
             if browser:
-                try:
-                    browser.close()
-                except Exception:
-                    pass
-
-            # On captcha or bot block errors do not retry blindly, break early
+                try: browser.close()
+                except: pass
             if "Captcha" in str(e) or "blocked" in str(e).lower():
-                log.error("Captcha detected or blocked, halting retries and escalating.")
+                log.error("Captcha/block detected – halting retries.")
                 return []
-
             if attempt < max_retries:
                 sleep_time = uniform(8, 15)
-                log.info(f"Retrying in {sleep_time:.1f} seconds...")
+                log.info(f"Retrying in {sleep_time:.1f} seconds…")
                 sleep(sleep_time)
             else:
                 log.error("Max retries reached, returning empty list")
@@ -339,7 +269,7 @@ HTML dump saved to: {html_path}
 def send_telegram_message(token, chat_id, text):
     import requests
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": False, "parse_mode": "HTML"}
+    payload = {"chat_id": chat_id, "text": text, **{"disable_web_page_preview": False, "parse_mode": "HTML"}}
     try:
         r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
@@ -382,7 +312,7 @@ def handle_test(conn, cookies):
     if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, txt):
         c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (job["id"], datetime.utcnow().isoformat()))
         conn.commit()
-        log.info("Sent test job %s", job["id"])
+        log.info("Sent /test job %s", job["id"])
 
 def main():
     cookies = load_playwright_cookies()
@@ -393,13 +323,13 @@ def main():
     offset = None
     jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
     sent = send_new_jobs(conn, jobs)
-    log.info("Sent %d jobs on startup", sent)
-    log.info("Polling Telegram for /test command")
+    log.info(f"Sent {sent} new jobs on startup.")
+    log.info("Polling Telegram for /test command…")
     while True:
         resp = None
         try:
             import requests
-            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20, "offset":offset}, timeout=25).json()
+            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20,"offset":offset}, timeout=25).json()
         except Exception:
             time.sleep(POLL_INTERVAL)
             continue
@@ -407,9 +337,9 @@ def main():
             for upd in resp.get("result", []):
                 offset = upd["update_id"] + 1
                 msg = upd.get("message", {})
-                if msg.get("chat", {}).get("id") == int(TELEGRAM_CHAT_ID) and msg.get("text", "").strip().lower() == "/test":
+                if msg.get("chat", {}).get("id") == int(TELEGRAM_CHAT_ID) and msg.get("text","").strip().lower()=="/test":
                     handle_test(conn, cookies)
         time.sleep(POLL_INTERVAL)
 
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
