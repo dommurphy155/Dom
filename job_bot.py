@@ -85,10 +85,38 @@ def git_commit_and_push():
     except subprocess.CalledProcessError as e:
         log.error(f"Git commit/push failed: {e}")
 
+def human_like_interactions(page):
+    import random
+    import time
+    # Random mouse moves
+    for _ in range(random.randint(5, 10)):
+        x = random.randint(100, 1000)
+        y = random.randint(100, 700)
+        page.mouse.move(x, y)
+        time.sleep(random.uniform(0.1, 0.3))
+    # Scroll down slowly in steps
+    viewport_height = page.evaluate("window.innerHeight")
+    for i in range(1, 4):
+        page.evaluate(f"window.scrollTo(0, {viewport_height * i / 4})")
+        time.sleep(random.uniform(0.5, 1.2))
+    # Random small scroll ups/downs
+    for _ in range(random.randint(1,3)):
+        delta = random.randint(-100, 100)
+        page.evaluate(f"window.scrollBy(0, {delta})")
+        time.sleep(random.uniform(0.2, 0.6))
+    # Small random click somewhere (avoid navigation)
+    box = page.viewport_size
+    if box:
+        x = random.randint(50, box["width"] - 50)
+        y = random.randint(50, box["height"] - 50)
+        page.mouse.click(x, y)
+        time.sleep(random.uniform(0.3, 0.7))
+
 def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
     import traceback
     from time import sleep
     from random import uniform, choice
+    from playwright_stealth import stealth_sync
 
     selectors = [
         'a.tapItem',
@@ -114,12 +142,16 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
         page = None
         try:
             with sync_playwright() as p:
+                # Run headless=False to evade detection better
                 browser = p.chromium.launch(
-                    headless=True,
+                    headless=False,
                     args=[
                         '--disable-blink-features=AutomationControlled',
                         '--no-sandbox',
                         '--disable-setuid-sandbox',
+                        '--disable-dev-shm-usage',
+                        '--disable-extensions',
+                        '--disable-gpu',
                     ]
                 )
 
@@ -137,9 +169,13 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
 
                 if cookies:
                     context.add_cookies(cookies)
+
                 page = context.new_page()
 
-                # Stealth script to mask automation
+                # Apply stealth plugin
+                stealth_sync(page)
+
+                # Extra low-level navigator overrides to harden stealth
                 page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     window.chrome = { runtime: {} };
@@ -149,12 +185,15 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
 
                 page.goto(base_url, timeout=30000)
 
-                # Give page time to load dynamic content
-                sleep(uniform(3, 5))
+                # Simulate human-like browsing activity to avoid detection
+                human_like_interactions(page)
 
-                # Detect captcha or bot block
+                # Wait a bit more for dynamic content to settle
+                sleep(uniform(2, 4))
+
+                # Detect captcha or bot block intelligently
                 content_lower = page.content().lower()
-                if any([
+                captcha_detected = any([
                     "captcha" in content_lower,
                     "verify you're human" in content_lower,
                     "recaptcha" in content_lower,
@@ -162,7 +201,25 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                     page.locator("div.g-recaptcha").count() > 0,
                     page.locator("iframe[src*='captcha']").count() > 0,
                     page.locator("div#captcha").count() > 0,
-                ]):
+                ])
+                if captcha_detected:
+                    # Do not retry blindly, escalate / pause
+                    now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+                    screenshot_path = f"captcha_screenshot_{now}.png"
+                    html_path = f"captcha_page_{now}.html"
+                    try:
+                        page.screenshot(path=screenshot_path)
+                    except Exception as se:
+                        log.error(f"Captcha screenshot failed: {se}")
+                        screenshot_path = "captcha screenshot failed"
+                    try:
+                        html_content = page.content()
+                        with open(html_path, "w", encoding="utf-8") as f:
+                            f.write(html_content)
+                    except Exception as he:
+                        log.error(f"Captcha HTML dump failed: {he}")
+                        html_path = "captcha html dump failed"
+                    log.error(f"Captcha detected. Screenshot saved: {screenshot_path}, HTML saved: {html_path}")
                     raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
 
                 found_selector = None
@@ -211,6 +268,7 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                     title = title_el.inner_text().strip() if title_el else "Job"
                     jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
 
+                # Correctly close browser AFTER screenshot/html dump and parsing done
                 browser.close()
                 log.info(f"Scraped {len(jobs)} jobs via Playwright on attempt {attempt}")
                 return jobs
@@ -264,6 +322,11 @@ HTML dump saved to: {html_path}
                     browser.close()
                 except Exception:
                     pass
+
+            # On captcha or bot block errors do not retry blindly, break early
+            if "Captcha" in str(e) or "blocked" in str(e).lower():
+                log.error("Captcha detected or blocked, halting retries and escalating.")
+                return []
 
             if attempt < max_retries:
                 sleep_time = uniform(8, 15)
