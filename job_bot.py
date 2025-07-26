@@ -32,12 +32,14 @@ if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
 logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 log = logging.getLogger()
 
+
 def init_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS sent_jobs (job_id TEXT PRIMARY KEY, sent_at TEXT NOT NULL)""")
     conn.commit()
     return conn
+
 
 def load_playwright_cookies():
     raw = os.getenv("COOKIE_JSON", "")
@@ -69,12 +71,14 @@ def load_playwright_cookies():
         })
     return sanitized
 
+
 def write_error_log(error_details):
     timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
     with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
         f.write(f"\n\n--- ERROR OCCURRED AT {timestamp} ---\n")
         f.write(error_details)
         f.write("\n--- END ERROR ---\n")
+
 
 def git_commit_and_push():
     try:
@@ -85,59 +89,98 @@ def git_commit_and_push():
     except subprocess.CalledProcessError as e:
         log.error(f"Git commit/push failed: {e}")
 
-def scrape_indeed_jobs_pw(query, location, cookies, max_results):
-    jobs = []
-    url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
-        )
+
+def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
+    import traceback
+    from time import sleep
+    from random import uniform
+
+    selectors = ['a.tapItem', 'div.job_seen_beacon a', 'a[data-jk]']
+    base_url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
+
+    for attempt in range(1, max_retries + 1):
+        jobs = []
         try:
-            if cookies:
-                context.add_cookies(cookies)
-            page = context.new_page()
-            page.goto(url, timeout=30000)
-            page.wait_for_selector('a.tapItem', timeout=15000)
-            els = page.query_selector_all('a.tapItem')
-            for el in els:
-                if len(jobs) >= max_results:
-                    break
-                jk = el.get_attribute('data-jk')
-                title_el = el.query_selector('h2.jobTitle span')
-                title = title_el.inner_text().strip() if title_el else "Job"
-                jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
-            browser.close()
-            log.info("Scraped %d jobs via Playwright", len(jobs))
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                               "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                    viewport={"width": 1280, "height": 800},
+                    java_script_enabled=True,
+                )
+                if cookies:
+                    context.add_cookies(cookies)
+                page = context.new_page()
+                page.goto(base_url, timeout=30000)
+
+                found_selector = None
+                for sel in selectors:
+                    try:
+                        page.wait_for_selector(sel, timeout=15000)
+                        found_selector = sel
+                        break
+                    except Exception:
+                        continue
+
+                if not found_selector:
+                    raise TimeoutError(f"None of the selectors {selectors} found on page")
+
+                els = page.query_selector_all(found_selector)
+                for el in els:
+                    if len(jobs) >= max_results:
+                        break
+                    jk = el.get_attribute('data-jk')
+                    if not jk:
+                        href = el.get_attribute('href')
+                        if href and 'jk=' in href:
+                            jk = href.split('jk=')[1].split('&')[0]
+                        else:
+                            continue
+                    title_el = el.query_selector('h2.jobTitle span') or el.query_selector('span[title]')
+                    title = title_el.inner_text().strip() if title_el else "Job"
+                    jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
+                browser.close()
+            log.info(f"Scraped {len(jobs)} jobs via Playwright on attempt {attempt}")
             return jobs
         except Exception as e:
-            # Gather error info
-            error_trace = traceback.format_exc()
-            current_url = page.url if 'page' in locals() else "N/A"
+            now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+            screenshot_path = f"error_screenshot_{now}.png"
+            html_path = f"error_page_{now}.html"
             try:
-                screenshot_path = "error_screenshot.png"
                 page.screenshot(path=screenshot_path)
             except Exception as se:
                 screenshot_path = f"screenshot failed: {se}"
             try:
                 html_content = page.content()
-                html_path = "error_page.html"
                 with open(html_path, "w", encoding="utf-8") as f:
                     f.write(html_content)
             except Exception as he:
                 html_path = f"html dump failed: {he}"
+            current_url = page.url if 'page' in locals() else base_url
+            tb = traceback.format_exc()
+            err_msg = f"""
+--- ERROR OCCURRED AT {datetime.utcnow().isoformat()} UTC ---
+Exception:
+{tb}
 
-            error_details = (
-                f"Exception:\n{error_trace}\n\n"
-                f"Current URL: {current_url}\n"
-                f"Screenshot saved to: {screenshot_path}\n"
-                f"HTML dump saved to: {html_path}\n"
-            )
-            write_error_log(error_details)
+Current URL: {current_url}
+Screenshot saved to: {screenshot_path}
+HTML dump saved to: {html_path}
+
+--- END ERROR ---
+"""
+            write_error_log(err_msg)
             git_commit_and_push()
-            log.error("Error during scraping. Details saved and pushed. Exiting.")
-            browser.close()
-            sys.exit(1)
+            log.error(f"Error scraping jobs on attempt {attempt}: {e}")
+            if attempt < max_retries:
+                sleep_time = uniform(5, 10)
+                log.info(f"Retrying in {sleep_time:.1f} seconds...")
+                sleep(sleep_time)
+            else:
+                log.error("Max retries reached, returning empty list")
+                return []
+
 
 def send_telegram_message(token, chat_id, text):
     import requests
@@ -150,6 +193,7 @@ def send_telegram_message(token, chat_id, text):
     except Exception as e:
         log.error("Telegram send error: %s", e)
         return False
+
 
 def send_new_jobs(conn, jobs):
     c = conn.cursor()
@@ -172,6 +216,7 @@ def send_new_jobs(conn, jobs):
             count += 1
     return count
 
+
 def handle_test(conn, cookies):
     log.info("/test invoked")
     jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
@@ -186,6 +231,7 @@ def handle_test(conn, cookies):
         c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (job["id"], datetime.utcnow().isoformat()))
         conn.commit()
         log.info("Sent test job %s", job["id"])
+
 
 def main():
     cookies = load_playwright_cookies()
@@ -202,7 +248,7 @@ def main():
         resp = None
         try:
             import requests
-            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20, "offset":offset}, timeout=25).json()
+            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout": 20, "offset": offset}, timeout=25).json()
         except Exception:
             time.sleep(POLL_INTERVAL)
             continue
@@ -213,6 +259,7 @@ def main():
                 if msg.get("chat", {}).get("id") == int(TELEGRAM_CHAT_ID) and msg.get("text", "").strip().lower() == "/test":
                     handle_test(conn, cookies)
         time.sleep(POLL_INTERVAL)
+
 
 if __name__ == "__main__":
     main()
