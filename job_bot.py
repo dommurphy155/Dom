@@ -1,19 +1,17 @@
+#!/usr/bin/env python3
 import os
 import sys
 import time
 import logging
 import sqlite3
 import random
-import requests
 import json
 from datetime import datetime
 from typing import Optional
-from http.cookiejar import Cookie, CookieJar
 from dotenv import load_dotenv
+from playwright.sync_api import sync_playwright
 
 load_dotenv()
-
-# --- CONFIG from ENV ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 LOCATION = os.getenv("LOCATION", "Leigh, WN7")
@@ -22,157 +20,71 @@ RADIUS_MILES = 5
 JOBS_TO_SCRAPE = 33
 JOBS_TO_SEND = 8
 DB_PATH = "jobs_sent.db"
-POLL_INTERVAL = 3  # seconds for Telegram polling
+POLL_INTERVAL = 3
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    print("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set as environment variables.")
+    print("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set.")
     sys.exit(1)
 
-# --- Logging ---
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
 log = logging.getLogger()
 
-# --- Load cookies from env var or cookie.json ---
-def load_cookies():
-    cookie_data = os.getenv("COOKIE_JSON")
-    if cookie_data:
-        log.info("Loading cookies from COOKIE_JSON environment variable.")
-        try:
-            cookies = json.loads(cookie_data)
-            if not isinstance(cookies, list):
-                raise ValueError("COOKIE_JSON must be a JSON array")
-            return cookies
-        except Exception as e:
-            log.error(f"Failed to parse COOKIE_JSON env var: {e}")
-            return None
-
-    cookie_file = "cookie.json"
-    if os.path.isfile(cookie_file):
-        log.info(f"Loading cookies from {cookie_file} file.")
-        try:
-            with open(cookie_file, "r", encoding="utf-8") as f:
-                cookies = json.load(f)
-            if not isinstance(cookies, list):
-                raise ValueError(f"{cookie_file} must contain a JSON array")
-            return cookies
-        except Exception as e:
-            log.error(f"Failed to load cookies from {cookie_file}: {e}")
-            return None
-
-    log.error("No cookies found: Set COOKIE_JSON env var or provide cookie.json file.")
-    return None
-
-def add_cookies_to_session(session: requests.Session, cookies: list):
-    jar = CookieJar()
-    for c in cookies:
-        try:
-            cookie = Cookie(
-                version=0,
-                name=c["name"],
-                value=c["value"],
-                port=None,
-                port_specified=False,
-                domain=c["domain"],
-                domain_specified=True,
-                domain_initial_dot=c["domain"].startswith('.'),
-                path=c.get("path", "/"),
-                path_specified=True,
-                secure=c.get("secure", False),
-                expires=c.get("expirationDate"),
-                discard=False,
-                comment=None,
-                comment_url=None,
-                rest={},
-                rfc2109=False,
-            )
-            jar.set_cookie(cookie)
-        except KeyError as e:
-            log.warning(f"Skipping invalid cookie missing {e}: {c}")
-    session.cookies = jar
-
-# --- SQLite setup ---
 def init_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS sent_jobs (
-            job_id TEXT PRIMARY KEY,
-            sent_at TEXT NOT NULL
-        )
-    """)
+    c.execute("""CREATE TABLE IF NOT EXISTS sent_jobs (job_id TEXT PRIMARY KEY, sent_at TEXT NOT NULL)""")
     conn.commit()
     return conn
 
-# --- Indeed scraper ---
-def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int, cookies: list):
+def load_playwright_cookies():
+    raw = os.getenv("COOKIE_JSON", "")
+    if not raw:
+        log.error("COOKIE_JSON env var empty. Put cookie JSON array there.")
+        return []
+    try:
+        arr = json.loads(raw)
+        cookies = []
+        for c in arr:
+            cookies.append({
+                "name": c["name"],
+                "value": c["value"],
+                "domain": c["domain"],
+                "path": c.get("path", "/"),
+                "httpOnly": c.get("httpOnly", False),
+                "secure": c.get("secure", False),
+                "sameSite": c.get("sameSite", "Lax").capitalize(),
+                "expires": int(c.get("expirationDate", 0))
+            })
+        return cookies
+    except Exception as e:
+        log.error("Failed to parse COOKIE_JSON: %s", e)
+        return []
+
+def scrape_indeed_jobs_pw(query, location, cookies, max_results):
     jobs = []
-    base_url = "https://uk.indeed.com/jobs"
-    params = {
-        "q": query,
-        "l": location,
-        "radius": radius,
-        "jt": "parttime",
-        "limit": 50,
-        "start": 0,
-    }
-    session = requests.Session()
-    add_cookies_to_session(session, cookies)
+    url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context()
+        if cookies:
+            context.add_cookies(cookies)
+        page = context.new_page()
+        page.goto(url, timeout=30000)
+        page.wait_for_selector('a.tapItem', timeout=15000)
+        els = page.query_selector_all('a.tapItem')
+        for el in els:
+            if len(jobs) >= max_results:
+                break
+            jk = el.get_attribute('data-jk')
+            title_el = el.query_selector('h2.jobTitle span')
+            title = title_el.inner_text().strip() if title_el else "Job"
+            jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
+        browser.close()
+    log.info("Scraped %d jobs via Playwright", len(jobs))
+    return jobs
 
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Accept-Language": "en-GB,en;q=0.9",
-        "Referer": "https://uk.indeed.com/",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-        "Connection": "keep-alive",
-    }
-
-    while len(jobs) < max_results:
-        params["start"] = len(jobs)
-        try:
-            r = session.get(base_url, params=params, headers=headers, timeout=10)
-            r.raise_for_status()
-        except Exception as e:
-            log.error(f"Failed to fetch jobs page: {e}")
-            break
-
-        text = r.text
-        job_ids = set()
-
-        lines = text.splitlines()
-        for line in lines:
-            if 'data-jk="' in line:
-                start_idx = line.find('data-jk="') + 9
-                end_idx = line.find('"', start_idx)
-                job_id = line[start_idx:end_idx]
-                if job_id in job_ids:
-                    continue
-                job_ids.add(job_id)
-                idx_title = line.find('title="')
-                if idx_title != -1:
-                    start_title = idx_title + 7
-                    end_title = line.find('"', start_title)
-                    title = line[start_title:end_title]
-                else:
-                    title = "Job"
-                url = f"https://uk.indeed.com/viewjob?jk={job_id}"
-                jobs.append({"id": job_id, "title": title.strip(), "url": url})
-                if len(jobs) >= max_results:
-                    break
-
-        if len(job_ids) == 0:
-            break
-
-        time.sleep(random.uniform(1, 3))
-
-    log.info(f"Scraped {len(jobs)} jobs from Indeed.")
-    return jobs[:max_results]
-
-# --- Telegram helpers ---
-def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
+def send_telegram_message(token, chat_id, text):
+    import requests
     url = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": False, "parse_mode": "HTML"}
     try:
@@ -180,100 +92,70 @@ def send_telegram_message(token: str, chat_id: str, text: str) -> bool:
         r.raise_for_status()
         return True
     except Exception as e:
-        log.error(f"Failed to send Telegram message: {e}")
+        log.error("Telegram send error: %s", e)
         return False
 
-def get_updates(token: str, offset: Optional[int]) -> dict:
-    url = f"https://api.telegram.org/bot{token}/getUpdates"
-    params = {"timeout": 20, "offset": offset}
-    try:
-        r = requests.get(url, params=params, timeout=25)
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        log.error(f"Failed to get Telegram updates: {e}")
-        return {}
-
-# --- Job sending logic ---
-def send_new_jobs(conn, token, chat_id, jobs, max_send):
+def send_new_jobs(conn, jobs):
     c = conn.cursor()
-    new_jobs = []
-    for job in jobs:
-        c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (job["id"],))
-        if c.fetchone() is None:
-            new_jobs.append(job)
-        if len(new_jobs) >= max_send:
+    new = []
+    for j in jobs:
+        c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (j["id"],))
+        if not c.fetchone():
+            new.append(j)
+        if len(new) >= JOBS_TO_SEND:
             break
-    if not new_jobs:
-        log.info("No new jobs to send.")
+    if not new:
+        log.info("No new jobs.")
         return 0
-    sent_count = 0
-    for job in new_jobs:
-        text = f"{job['title']}\n{job['url']}"
-        if send_telegram_message(token, chat_id, text):
-            c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (job["id"], datetime.utcnow().isoformat()))
+    count = 0
+    for j in new:
+        txt = f"{j['title']}\n{j['url']}"
+        if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, txt):
+            c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (j["id"], datetime.utcnow().isoformat()))
             conn.commit()
-            sent_count += 1
-            log.info(f"Sent job: {job['title']}")
-        else:
-            log.error(f"Failed to send job: {job['title']}")
-    return sent_count
+            count += 1
+    return count
 
-# --- /test command handler ---
-def handle_test_command(conn, cookies):
-    log.info("/test command received - sending 1 random unsent job")
-    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE, cookies)
+def handle_test(conn, cookies):
+    log.info("/test invoked")
+    jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
     c = conn.cursor()
-    unsent_jobs = []
-    for job in jobs:
-        c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (job["id"],))
-        if c.fetchone() is None:
-            unsent_jobs.append(job)
-    if not unsent_jobs:
-        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, "No new jobs available to send.")
+    unsent = [j for j in jobs if not c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (j["id"],)).fetchone()]
+    if not unsent:
+        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, "No new jobs to send.")
         return
-    job = random.choice(unsent_jobs)
-    text = f"{job['title']}\n{job['url']}"
-    if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, text):
+    job = random.choice(unsent)
+    txt = f"{job['title']}\n{job['url']}"
+    if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, txt):
         c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (job["id"], datetime.utcnow().isoformat()))
         conn.commit()
-        log.info(f"Sent job (test): {job['title']}")
-    else:
-        log.error("Failed to send job on /test command.")
+        log.info("Sent test job %s", job["id"])
 
 def main():
-    cookies = load_cookies()
+    cookies = load_playwright_cookies()
     if not cookies:
-        log.error("Aborting: No valid cookies loaded.")
+        log.error("Aborting due to missing cookies.")
         sys.exit(1)
-
     conn = init_db()
-
     offset = None
-
-    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE, cookies)
-    sent = send_new_jobs(conn, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, jobs, JOBS_TO_SEND)
-    log.info(f"Sent {sent} new jobs on startup.")
-
-    log.info("Entering long polling loop for /test command...")
-
+    jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
+    sent = send_new_jobs(conn, jobs)
+    log.info("Sent %d jobs on startup", sent)
+    log.info("Polling Telegram for /test command")
     while True:
-        updates = get_updates(TELEGRAM_TOKEN, offset)
-        if not updates or not updates.get("ok"):
+        resp = None
+        try:
+            import requests
+            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20, "offset":offset}, timeout=25).json()
+        except Exception as e:
             time.sleep(POLL_INTERVAL)
             continue
-        results = updates.get("result", [])
-        for update in results:
-            offset = update["update_id"] + 1
-            message = update.get("message")
-            if not message:
-                continue
-            text = message.get("text", "")
-            chat_id = message.get("chat", {}).get("id")
-            if chat_id != int(TELEGRAM_CHAT_ID):
-                continue
-            if text.strip().lower() == "/test":
-                handle_test_command(conn, cookies)
+        if resp.get("ok"):
+            for upd in resp.get("result", []):
+                offset = upd["update_id"] + 1
+                msg = upd.get("message", {})
+                if msg.get("chat", {}).get("id") == int(TELEGRAM_CHAT_ID) and msg.get("text", "").strip().lower() == "/test":
+                    handle_test(conn, cookies)
         time.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":
