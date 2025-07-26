@@ -58,3 +58,33 @@ Screenshot saved to: error_screenshot.png
 HTML dump saved to: error_page.html
 
 --- END ERROR ---
+
+
+--- ERROR OCCURRED AT 2025-07-26 22:48:14 UTC ---
+Exception:
+Traceback (most recent call last):
+  File "/home/ubuntu/Dom/job_bot.py", line 101, in scrape_indeed_jobs_pw
+    page.wait_for_selector('a.tapItem', timeout=15000)
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/sync_api/_generated.py", line 8182, in wait_for_selector
+    self._sync(
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/_impl/_sync_base.py", line 115, in _sync
+    return task.result()
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/_impl/_page.py", line 423, in wait_for_selector
+    return await self._main_frame.wait_for_selector(**locals_to_params(locals()))
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/_impl/_frame.py", line 369, in wait_for_selector
+    await self._channel.send(
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+  File "/home/ubuntu/Dom/venv/lib/python3.10/site-packages/playwright/_impl/_connection.py", line 558, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TimeoutError: Page.wait_for_selector: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("a.tapItem") to be visible
+
+
+
+Current URL: https://uk.indeed.com/jobs?q=part%20time&l=Leigh,%20WN7%201NX&radius=5&jt=parttime
+Screenshot saved to: error_screenshot.png
+HTML dump saved to: error_page.html
+
+--- END ERROR ---
