@@ -6,6 +6,8 @@ import sqlite3
 import random
 import requests
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+load_dotenv()
 
 # --- CONFIG from ENV ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
