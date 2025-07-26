@@ -17,3 +17,22 @@ HTML dump saved to: html dump failed: Event loop is closed! Is Playwright alread
 --- END ERROR ---
 
 --- END ERROR ---
+
+
+--- ERROR OCCURRED AT 2025-07-26 22:58:14 UTC ---
+
+--- ERROR OCCURRED AT 2025-07-26T22:58:14.338138 UTC ---
+Exception:
+Traceback (most recent call last):
+  File "/home/ubuntu/Dom/job_bot.py", line 140, in scrape_indeed_jobs_pw
+    raise TimeoutError(f"None of the selectors {selectors} found on page. "
+TimeoutError: None of the selectors ['a.tapItem', 'div.job_seen_beacon a', 'a[data-jk]'] found on page. Screenshot saved to: error_screenshot_20250726225813.png, HTML saved to: error_page_20250726225813.html
+
+
+Current URL: https://uk.indeed.com/jobs?q=part%20time&l=Leigh,%20WN7%201NX&radius=5&jt=parttime
+Screenshot saved to: screenshot failed: Event loop is closed! Is Playwright already stopped?
+HTML dump saved to: html dump failed: Event loop is closed! Is Playwright already stopped?
+
+--- END ERROR ---
+
+--- END ERROR ---
