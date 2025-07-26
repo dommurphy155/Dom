@@ -88,16 +88,24 @@ def git_commit_and_push():
 def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
     import traceback
     from time import sleep
-    from random import uniform
+    from random import uniform, choice
 
     selectors = [
-        'a.tapItem', 
-        'div.job_seen_beacon a', 
-        'a[data-jk]', 
-        'a[aria-label*="Job"]', 
-        'a[data-testid="jobTitle"]'
+        'a.tapItem',
+        'div.job_seen_beacon a',
+        'a[data-jk]',
+        'a[aria-label*="Job"]',
+        'a[data-testid="jobTitle"]',
+        'a[href*="/rc/clk?"]',
+        'a.jobtitle',  # legacy fallback
     ]
     base_url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
+
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0",
+    ]
 
     for attempt in range(1, max_retries + 1):
         jobs = []
@@ -106,33 +114,61 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
         page = None
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
+                browser = p.chromium.launch(
+                    headless=True,
+                    args=[
+                        '--disable-blink-features=AutomationControlled',
+                        '--no-sandbox',
+                        '--disable-setuid-sandbox',
+                    ]
+                )
+
                 context = browser.new_context(
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                               "(KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+                    user_agent=choice(user_agents),
                     viewport={"width": 1280, "height": 800},
                     java_script_enabled=True,
+                    bypass_csp=True,
+                    locale="en-GB",
+                    timezone_id="Europe/London",
+                    device_scale_factor=1,
+                    is_mobile=False,
+                    permissions=[],
                 )
+
                 if cookies:
                     context.add_cookies(cookies)
                 page = context.new_page()
+
+                # Stealth script to mask automation
+                page.add_init_script("""
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    window.chrome = { runtime: {} };
+                    Object.defineProperty(navigator, 'languages', {get: () => ['en-GB', 'en']});
+                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+                """)
+
                 page.goto(base_url, timeout=30000)
+
+                # Give page time to load dynamic content
+                sleep(uniform(3, 5))
 
                 # Detect captcha or bot block
                 content_lower = page.content().lower()
                 if any([
                     "captcha" in content_lower,
                     "verify you're human" in content_lower,
+                    "recaptcha" in content_lower,
                     page.locator("input#captcha").count() > 0,
                     page.locator("div.g-recaptcha").count() > 0,
                     page.locator("iframe[src*='captcha']").count() > 0,
+                    page.locator("div#captcha").count() > 0,
                 ]):
                     raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
 
                 found_selector = None
                 for sel in selectors:
                     try:
-                        page.wait_for_selector(sel, timeout=15000)
+                        page.wait_for_selector(sel, timeout=10000)
                         found_selector = sel
                         break
                     except Exception:
@@ -145,16 +181,20 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                     try:
                         page.screenshot(path=screenshot_path)
                     except Exception as se:
-                        screenshot_path = f"screenshot failed: {se}"
+                        log.error(f"Screenshot failed: {se}")
+                        screenshot_path = "screenshot failed"
                     try:
                         html_content = page.content()
                         with open(html_path, "w", encoding="utf-8") as f:
                             f.write(html_content)
                     except Exception as he:
-                        html_path = f"html dump failed: {he}"
+                        log.error(f"HTML dump failed: {he}")
+                        html_path = "html dump failed"
                     current_url = page.url if page else base_url
-                    raise TimeoutError(f"None of the selectors {selectors} found on page. "
-                                       f"Screenshot saved to: {screenshot_path}, HTML saved to: {html_path}")
+                    raise TimeoutError(
+                        f"None of the selectors {selectors} found on page. "
+                        f"Screenshot saved to: {screenshot_path}, HTML saved to: {html_path}"
+                    )
 
                 els = page.query_selector_all(found_selector)
                 for el in els:
@@ -180,6 +220,8 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
             screenshot_path = f"error_screenshot_{now}.png"
             html_path = f"error_page_{now}.html"
             current_url = base_url
+
+            # Screenshot and HTML dump BEFORE closing browser
             try:
                 if page:
                     page.screenshot(path=screenshot_path)
@@ -224,7 +266,7 @@ HTML dump saved to: {html_path}
                     pass
 
             if attempt < max_retries:
-                sleep_time = uniform(5, 10)
+                sleep_time = uniform(8, 15)
                 log.info(f"Retrying in {sleep_time:.1f} seconds...")
                 sleep(sleep_time)
             else:
