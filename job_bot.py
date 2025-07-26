@@ -5,9 +5,12 @@ import logging
 import sqlite3
 import random
 import requests
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from typing import Optional
+from http.cookiejar import Cookie, CookieJar
 from dotenv import load_dotenv
+
 load_dotenv()
 
 # --- CONFIG from ENV ---
@@ -33,6 +36,64 @@ logging.basicConfig(
 )
 log = logging.getLogger()
 
+# --- Load cookies from env var or cookie.json ---
+def load_cookies():
+    cookie_data = os.getenv("COOKIE_JSON")
+    if cookie_data:
+        log.info("Loading cookies from COOKIE_JSON environment variable.")
+        try:
+            cookies = json.loads(cookie_data)
+            if not isinstance(cookies, list):
+                raise ValueError("COOKIE_JSON must be a JSON array")
+            return cookies
+        except Exception as e:
+            log.error(f"Failed to parse COOKIE_JSON env var: {e}")
+            return None
+
+    cookie_file = "cookie.json"
+    if os.path.isfile(cookie_file):
+        log.info(f"Loading cookies from {cookie_file} file.")
+        try:
+            with open(cookie_file, "r", encoding="utf-8") as f:
+                cookies = json.load(f)
+            if not isinstance(cookies, list):
+                raise ValueError(f"{cookie_file} must contain a JSON array")
+            return cookies
+        except Exception as e:
+            log.error(f"Failed to load cookies from {cookie_file}: {e}")
+            return None
+
+    log.error("No cookies found: Set COOKIE_JSON env var or provide cookie.json file.")
+    return None
+
+def add_cookies_to_session(session: requests.Session, cookies: list):
+    jar = CookieJar()
+    for c in cookies:
+        try:
+            cookie = Cookie(
+                version=0,
+                name=c["name"],
+                value=c["value"],
+                port=None,
+                port_specified=False,
+                domain=c["domain"],
+                domain_specified=True,
+                domain_initial_dot=c["domain"].startswith('.'),
+                path=c.get("path", "/"),
+                path_specified=True,
+                secure=c.get("secure", False),
+                expires=c.get("expirationDate"),
+                discard=False,
+                comment=None,
+                comment_url=None,
+                rest={},
+                rfc2109=False,
+            )
+            jar.set_cookie(cookie)
+        except KeyError as e:
+            log.warning(f"Skipping invalid cookie missing {e}: {c}")
+    session.cookies = jar
+
 # --- SQLite setup ---
 def init_db():
     conn = sqlite3.connect(DB_PATH, timeout=10)
@@ -47,7 +108,7 @@ def init_db():
     return conn
 
 # --- Indeed scraper ---
-def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int):
+def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int, cookies: list):
     jobs = []
     base_url = "https://uk.indeed.com/jobs"
     params = {
@@ -59,9 +120,16 @@ def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int)
         "start": 0,
     }
     session = requests.Session()
+    add_cookies_to_session(session, cookies)
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/107.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Referer": "https://uk.indeed.com/",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Connection": "keep-alive",
     }
+
     while len(jobs) < max_results:
         params["start"] = len(jobs)
         try:
@@ -70,8 +138,10 @@ def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int)
         except Exception as e:
             log.error(f"Failed to fetch jobs page: {e}")
             break
+
         text = r.text
         job_ids = set()
+
         lines = text.splitlines()
         for line in lines:
             if 'data-jk="' in line:
@@ -81,8 +151,6 @@ def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int)
                 if job_id in job_ids:
                     continue
                 job_ids.add(job_id)
-                # Extract title from title="" attribute
-                title = None
                 idx_title = line.find('title="')
                 if idx_title != -1:
                     start_title = idx_title + 7
@@ -94,8 +162,12 @@ def scrape_indeed_jobs(query: str, location: str, radius: int, max_results: int)
                 jobs.append({"id": job_id, "title": title.strip(), "url": url})
                 if len(jobs) >= max_results:
                     break
+
         if len(job_ids) == 0:
             break
+
+        time.sleep(random.uniform(1, 3))
+
     log.info(f"Scraped {len(jobs)} jobs from Indeed.")
     return jobs[:max_results]
 
@@ -148,9 +220,9 @@ def send_new_jobs(conn, token, chat_id, jobs, max_send):
     return sent_count
 
 # --- /test command handler ---
-def handle_test_command(conn):
+def handle_test_command(conn, cookies):
     log.info("/test command received - sending 1 random unsent job")
-    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE)
+    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE, cookies)
     c = conn.cursor()
     unsent_jobs = []
     for job in jobs:
@@ -170,13 +242,16 @@ def handle_test_command(conn):
         log.error("Failed to send job on /test command.")
 
 def main():
+    cookies = load_cookies()
+    if not cookies:
+        log.error("Aborting: No valid cookies loaded.")
+        sys.exit(1)
+
     conn = init_db()
 
-    # Telegram update offset to avoid duplicates
     offset = None
 
-    # On start, scrape and send batch of jobs once
-    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE)
+    jobs = scrape_indeed_jobs(JOB_QUERY, LOCATION, RADIUS_MILES, JOBS_TO_SCRAPE, cookies)
     sent = send_new_jobs(conn, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, jobs, JOBS_TO_SEND)
     log.info(f"Sent {sent} new jobs on startup.")
 
@@ -196,11 +271,10 @@ def main():
             text = message.get("text", "")
             chat_id = message.get("chat", {}).get("id")
             if chat_id != int(TELEGRAM_CHAT_ID):
-                continue  # ignore other chats
+                continue
             if text.strip().lower() == "/test":
-                handle_test_command(conn)
+                handle_test_command(conn, cookies)
         time.sleep(POLL_INTERVAL)
-
 
 if __name__ == "__main__":
     main()
