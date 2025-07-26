@@ -144,7 +144,7 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
             with sync_playwright() as p:
                 # Run headless=False to evade detection better
                 browser = p.chromium.launch(
-                    headless=False,
+                    headless=True,
                     args=[
                         '--disable-blink-features=AutomationControlled',
                         '--no-sandbox',
