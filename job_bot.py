@@ -90,7 +90,13 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
     from time import sleep
     from random import uniform
 
-    selectors = ['a.tapItem', 'div.job_seen_beacon a', 'a[data-jk]']
+    selectors = [
+        'a.tapItem', 
+        'div.job_seen_beacon a', 
+        'a[data-jk]', 
+        'a[aria-label*="Job"]', 
+        'a[data-testid="jobTitle"]'
+    ]
     base_url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
 
     for attempt in range(1, max_retries + 1):
@@ -112,6 +118,17 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                 page = context.new_page()
                 page.goto(base_url, timeout=30000)
 
+                # Detect captcha or bot block
+                content_lower = page.content().lower()
+                if any([
+                    "captcha" in content_lower,
+                    "verify you're human" in content_lower,
+                    page.locator("input#captcha").count() > 0,
+                    page.locator("div.g-recaptcha").count() > 0,
+                    page.locator("iframe[src*='captcha']").count() > 0,
+                ]):
+                    raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
+
                 found_selector = None
                 for sel in selectors:
                     try:
@@ -122,7 +139,6 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                         continue
 
                 if not found_selector:
-                    # Capture before closing browser/context
                     now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
                     screenshot_path = f"error_screenshot_{now}.png"
                     html_path = f"error_page_{now}.html"
@@ -160,7 +176,6 @@ def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
                 return jobs
 
         except Exception as e:
-            # Capture error info BEFORE browser close in case it's still open
             now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
             screenshot_path = f"error_screenshot_{now}.png"
             html_path = f"error_page_{now}.html"
