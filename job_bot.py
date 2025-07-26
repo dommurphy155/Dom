@@ -1,15 +1,3 @@
-#!/usr/bin/env python3
-"""
-Minimal Indeed Job Scraper + Telegram Sender + /test command
-
-- Scrapes 33 part-time jobs from Indeed within 5 miles of LOCATION
-- Sends top 8 new jobs (title + link) to TELEGRAM_CHAT_ID
-- /test command sends 1 random new job on demand
-- Uses SQLite to avoid duplicates
-- Basic long polling for Telegram updates (only /test command)
-- Run continuously or via cron/systemd
-"""
-
 import os
 import sys
 import time
