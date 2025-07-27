@@ -1,414 +1,134 @@
 #!/usr/bin/env python3
-import os
-import sys
-import time
-import logging
-import sqlite3
-import random
-import json
-import traceback
-from datetime import datetime
-from typing import Optional
+import os, sys, time, json, asyncio, logging, sqlite3, traceback
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from aiogram import Bot, Dispatcher, types
+from aiogram.utils import executor
 from playwright.sync_api import sync_playwright
-import subprocess
 from stealth import apply_stealth_sync
 
+# Load config
 load_dotenv()
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-LOCATION = os.getenv("LOCATION", "Leigh, WN7")
-JOB_QUERY = os.getenv("JOB_QUERY", "part time")
-RADIUS_MILES = 5
-JOBS_TO_SCRAPE = 33
-JOBS_TO_SEND = 8
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = int(os.getenv("TELEGRAM_CHAT_ID"))
+COOKIES_FILE = "cookies.json"
 DB_PATH = "jobs_sent.db"
-POLL_INTERVAL = 3
-ERROR_LOG_FILE = "job_bot_errors.log"
-COOKIES_FILE = "cookies.json"  # File to load cookies from
+QUERY = "part time"
+LOCATION = "Leigh"
+MAX_DISTANCE = 5  # miles
+SCRAPE_LIMIT = 33
+SEND_LIMIT = 8
+SEND_TIMES = ["10:30", "17:30", "21:00"]
 
-if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    print("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set.")
-    sys.exit(1)
-
-logging.basicConfig(level=logging.INFO, format="[%(asctime)s] %(levelname)s: %(message)s")
+# Logging
+logging.basicConfig(level=logging.INFO, format='[%(asctime)s] %(message)s')
 log = logging.getLogger()
 
+# Bot init
+bot = Bot(token=TOKEN)
+dp = Dispatcher(bot)
+
+# DB init
 def init_db():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    c.execute("""CREATE TABLE IF NOT EXISTS sent_jobs (job_id TEXT PRIMARY KEY, sent_at TEXT NOT NULL)""")
+    c.execute("CREATE TABLE IF NOT EXISTS sent_jobs (job_id TEXT PRIMARY KEY)")
     conn.commit()
-    return conn
+    conn.close()
 
-def load_playwright_cookies():
-    if not os.path.isfile(COOKIES_FILE):
-        log.error(f"Cookies file '{COOKIES_FILE}' not found.")
-        return []
+def already_sent(job_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT 1 FROM sent_jobs WHERE job_id = ?", (job_id,))
+    result = c.fetchone()
+    conn.close()
+    return result is not None
+
+def mark_sent(job_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT OR IGNORE INTO sent_jobs (job_id) VALUES (?)", (job_id,))
+    conn.commit()
+    conn.close()
+
+# Scraper
+def scrape_jobs():
     try:
-        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
-            cookies = json.load(f)
-    except Exception as e:
-        log.error(f"Failed to load cookies from '{COOKIES_FILE}': {e}")
-        return []
-
-    sanitized = []
-    for c in cookies:
-        same_site = c.get("sameSite", "Lax")
-        if same_site not in ["Strict", "Lax", "None"]:
-            same_site = "Lax"
-        sanitized.append({
-            "name": c["name"],
-            "value": c["value"],
-            "domain": c["domain"],
-            "path": c.get("path", "/"),
-            "httpOnly": c.get("httpOnly", False),
-            "secure": c.get("secure", False),
-            "sameSite": same_site,
-            "expires": int(c.get("expirationDate", 0))
-        })
-    return sanitized
-
-def write_error_log(error_details):
-    timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
-    with open(ERROR_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"\n\n--- ERROR OCCURRED AT {timestamp} ---\n")
-        f.write(error_details)
-        f.write("\n--- END ERROR ---\n")
-
-def git_commit_and_push():
-    try:
-        subprocess.run(["git", "add", ERROR_LOG_FILE], check=True)
-        subprocess.run(["git", "commit", "-m", "Auto commit: logged job_bot error"], check=True)
-        subprocess.run(["git", "push"], check=True)
-        log.info("Error log committed and pushed to GitHub successfully.")
-    except subprocess.CalledProcessError as e:
-        log.error(f"Git commit/push failed: {e}")
-
-def human_like_interactions(page):
-    import random
-    import time
-    # Random mouse moves
-    for _ in range(random.randint(5, 10)):
-        x = random.randint(100, 1000)
-        y = random.randint(100, 700)
-        page.mouse.move(x, y)
-        time.sleep(random.uniform(0.1, 0.3))
-    # Scroll down slowly in steps
-    viewport_height = page.evaluate("window.innerHeight")
-    for i in range(1, 4):
-        page.evaluate(f"window.scrollTo(0, {viewport_height * i / 4})")
-        time.sleep(random.uniform(0.5, 1.2))
-    # Random small scroll ups/downs
-    for _ in range(random.randint(1,3)):
-        delta = random.randint(-100, 100)
-        page.evaluate(f"window.scrollBy(0, {delta})")
-        time.sleep(random.uniform(0.2, 0.6))
-    # Small random click somewhere (avoid navigation)
-    box = page.viewport_size
-    if box:
-        x = random.randint(50, box["width"] - 50)
-        y = random.randint(50, box["height"] - 50)
-        page.mouse.click(x, y)
-        time.sleep(random.uniform(0.3, 0.7))
-
-def scrape_indeed_jobs_pw(query, location, cookies, max_results, max_retries=3):
-    import traceback
-    from time import sleep
-    from random import uniform, choice
-
-    selectors = [
-        'a.tapItem',
-        'div.job_seen_beacon a',
-        'a[data-jk]',
-        'a[aria-label*="Job"]',
-        'a[data-testid="jobTitle"]',
-        'a[href*="/rc/clk?"]',
-        'a.jobtitle',  # legacy fallback
-    ]
-    base_url = f"https://uk.indeed.com/jobs?q={query}&l={location}&radius={RADIUS_MILES}&jt=parttime"
-
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.1 Safari/605.1.15",
-        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:115.0) Gecko/20100101 Firefox/115.0",
-    ]
-
-    for attempt in range(1, max_retries + 1):
-        jobs = []
-        browser = None
-        context = None
-        page = None
-        try:
-            with sync_playwright() as p:
-                # Run headless=False to evade detection better
-                browser = p.chromium.launch(
-                    headless=True,
-                    args=[
-                        '--disable-blink-features=AutomationControlled',
-                        '--no-sandbox',
-                        '--disable-setuid-sandbox',
-                        '--disable-dev-shm-usage',
-                        '--disable-extensions',
-                        '--disable-gpu',
-                    ]
-                )
-
-                context = browser.new_context(
-                    user_agent=choice(user_agents),
-                    viewport={"width": 1280, "height": 800},
-                    java_script_enabled=True,
-                    bypass_csp=True,
-                    locale="en-GB",
-                    timezone_id="Europe/London",
-                    device_scale_factor=1,
-                    is_mobile=False,
-                    permissions=[],
-                )
-
-                if cookies:
-                    context.add_cookies(cookies)
-
-                page = context.new_page()
-
-                # Apply stealth plugin
-                apply_stealth_sync(page)
-
-                # Extra low-level navigator overrides to harden stealth
-                page.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    window.chrome = { runtime: {} };
-                    Object.defineProperty(navigator, 'languages', {get: () => ['en-GB', 'en']});
-                    Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-                """)
-
-                page.goto(base_url, timeout=30000)
-
-                # Simulate human-like browsing activity to avoid detection
-                human_like_interactions(page)
-
-                # Wait a bit more for dynamic content to settle
-                sleep(uniform(2, 4))
-
-                # Detect captcha or bot block intelligently
-                content_lower = page.content().lower()
-                captcha_detected = any([
-                    "captcha" in content_lower,
-                    "verify you're human" in content_lower,
-                    "recaptcha" in content_lower,
-                    page.locator("input#captcha").count() > 0,
-                    page.locator("div.g-recaptcha").count() > 0,
-                    page.locator("iframe[src*='captcha']").count() > 0,
-                    page.locator("div#captcha").count() > 0,
-                ])
-                if captcha_detected:
-                    # Do not retry blindly, escalate / pause
-                    now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-                    screenshot_path = f"captcha_screenshot_{now}.png"
-                    html_path = f"captcha_page_{now}.html"
-                    try:
-                        page.screenshot(path=screenshot_path)
-                    except Exception as se:
-                        log.error(f"Captcha screenshot failed: {se}")
-                        screenshot_path = "captcha screenshot failed"
-                    try:
-                        html_content = page.content()
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(html_content)
-                    except Exception as he:
-                        log.error(f"Captcha HTML dump failed: {he}")
-                        html_path = "captcha html dump failed"
-                    log.error(f"Captcha detected. Screenshot saved: {screenshot_path}, HTML saved: {html_path}")
-                    raise RuntimeError("Blocked by Captcha or Bot detection on Indeed page")
-
-                found_selector = None
-                for sel in selectors:
-                    try:
-                        page.wait_for_selector(sel, timeout=10000)
-                        found_selector = sel
-                        break
-                    except Exception:
-                        continue
-
-                if not found_selector:
-                    now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-                    screenshot_path = f"error_screenshot_{now}.png"
-                    html_path = f"error_page_{now}.html"
-                    try:
-                        page.screenshot(path=screenshot_path)
-                    except Exception as se:
-                        log.error(f"Screenshot failed: {se}")
-                        screenshot_path = "screenshot failed"
-                    try:
-                        html_content = page.content()
-                        with open(html_path, "w", encoding="utf-8") as f:
-                            f.write(html_content)
-                    except Exception as he:
-                        log.error(f"HTML dump failed: {he}")
-                        html_path = "html dump failed"
-                    current_url = page.url if page else base_url
-                    raise TimeoutError(
-                        f"None of the selectors {selectors} found on page. "
-                        f"Screenshot saved to: {screenshot_path}, HTML saved to: {html_path}"
-                    )
-
-                els = page.query_selector_all(found_selector)
-                for el in els:
-                    if len(jobs) >= max_results:
-                        break
-                    jk = el.get_attribute('data-jk')
-                    if not jk:
-                        href = el.get_attribute('href')
-                        if href and 'jk=' in href:
-                            jk = href.split('jk=')[1].split('&')[0]
-                        else:
-                            continue
-                    title_el = el.query_selector('h2.jobTitle span') or el.query_selector('span[title]')
-                    title = title_el.inner_text().strip() if title_el else "Job"
-                    jobs.append({"id": jk, "title": title, "url": f"https://uk.indeed.com/viewjob?jk={jk}"})
-
-                # Correctly close browser AFTER screenshot/html dump and parsing done
-                browser.close()
-                log.info(f"Scraped {len(jobs)} jobs via Playwright on attempt {attempt}")
-                return jobs
-
-        except Exception as e:
-            now = datetime.utcnow().strftime("%Y%m%d%H%M%S")
-            screenshot_path = f"error_screenshot_{now}.png"
-            html_path = f"error_page_{now}.html"
-            current_url = base_url
-
-            # Screenshot and HTML dump BEFORE closing browser
-            try:
-                if page:
-                    page.screenshot(path=screenshot_path)
-                else:
-                    screenshot_path = "no page to screenshot"
-            except Exception as se:
-                screenshot_path = f"screenshot failed: {se}"
-
-            try:
-                if page:
-                    html_content = page.content()
-                    with open(html_path, "w", encoding="utf-8") as f:
-                        f.write(html_content)
-                else:
-                    html_path = "no page to dump html"
-            except Exception as he:
-                html_path = f"html dump failed: {he}"
-
-            if page and page.url:
-                current_url = page.url
-
-            tb = traceback.format_exc()
-            err_msg = f"""
---- ERROR OCCURRED AT {datetime.utcnow().isoformat()} UTC ---
-Exception:
-{tb}
-
-Current URL: {current_url}
-Screenshot saved to: {screenshot_path}
-HTML dump saved to: {html_path}
-
---- END ERROR ---
-"""
-            write_error_log(err_msg)
-            git_commit_and_push()
-            log.error(f"Error scraping jobs on attempt {attempt}: {e}")
-
-            if browser:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context()
+            if os.path.exists(COOKIES_FILE):
+                with open(COOKIES_FILE, "r") as f:
+                    context.add_cookies(json.load(f))
+            page = context.new_page()
+            apply_stealth_sync(page)
+            log.info("Loading Indeed search...")
+            page.goto(f"https://uk.indeed.com/jobs?q={QUERY.replace(' ', '+')}&l={LOCATION}&radius={MAX_DISTANCE}", timeout=30000)
+            page.wait_for_selector("a[data-jk]", timeout=10000)
+            job_elements = page.query_selector_all("a[data-jk]")[:SCRAPE_LIMIT]
+            jobs = []
+            for el in job_elements:
                 try:
-                    browser.close()
+                    jk = el.get_attribute("data-jk")
+                    title = el.inner_text().strip()
+                    href = f"https://uk.indeed.com/viewjob?jk={jk}"
+                    if not already_sent(jk):
+                        jobs.append((jk, title, href))
                 except Exception:
-                    pass
-
-            # On captcha or bot block errors do not retry blindly, break early
-            if "Captcha" in str(e) or "blocked" in str(e).lower():
-                log.error("Captcha detected or blocked, halting retries and escalating.")
-                return []
-
-            if attempt < max_retries:
-                sleep_time = uniform(8, 15)
-                log.info(f"Retrying in {sleep_time:.1f} seconds...")
-                sleep(sleep_time)
-            else:
-                log.error("Max retries reached, returning empty list")
-                return []
-
-def send_telegram_message(token, chat_id, text):
-    import requests
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": False, "parse_mode": "HTML"}
-    try:
-        r = requests.post(url, json=payload, timeout=10)
-        r.raise_for_status()
-        return True
+                    continue
+            browser.close()
+            return jobs[:SEND_LIMIT]
     except Exception as e:
-        log.error("Telegram send error: %s", e)
-        return False
+        log.error("Scraping failed: " + str(e))
+        return []
 
-def send_new_jobs(conn, jobs):
-    c = conn.cursor()
-    new = []
-    for j in jobs:
-        c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (j["id"],))
-        if not c.fetchone():
-            new.append(j)
-        if len(new) >= JOBS_TO_SEND:
-            break
-    if not new:
-        log.info("No new jobs.")
-        return 0
-    count = 0
-    for j in new:
-        txt = f"{j['title']}\n{j['url']}"
-        if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, txt):
-            c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (j["id"], datetime.utcnow().isoformat()))
-            conn.commit()
-            count += 1
-    return count
+# Telegram Handlers
+@dp.message_handler(commands=["test"])
+async def handle_test(msg: types.Message):
+    jobs = scrape_jobs()
+    if jobs:
+        await send_job(jobs[0])
+    else:
+        await msg.reply("No jobs found.")
 
-def handle_test(conn, cookies):
-    log.info("/test invoked")
-    jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
-    c = conn.cursor()
-    unsent = [j for j in jobs if not c.execute("SELECT 1 FROM sent_jobs WHERE job_id=?", (j["id"],)).fetchone()]
-    if not unsent:
-        send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, "No new jobs to send.")
-        return
-    job = random.choice(unsent)
-    txt = f"{job['title']}\n{job['url']}"
-    if send_telegram_message(TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, txt):
-        c.execute("INSERT INTO sent_jobs (job_id, sent_at) VALUES (?, ?)", (job["id"], datetime.utcnow().isoformat()))
-        conn.commit()
-        log.info("Sent test job %s", job["id"])
+@dp.callback_query_handler(lambda c: c.data.startswith("accept_") or c.data.startswith("decline_"))
+async def handle_action(callback: types.CallbackQuery):
+    action, job_id = callback.data.split("_", 1)
+    await callback.answer()
+    if action == "accept":
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.reply("👍 Marked accepted.")
+    else:
+        await callback.message.edit_reply_markup(reply_markup=None)
+        await callback.message.reply("❌ Deleted.")
 
-def main():
-    cookies = load_playwright_cookies()
-    if not cookies:
-        log.error("Aborting due to missing cookies.")
-        sys.exit(1)
-    conn = init_db()
-    offset = None
-    jobs = scrape_indeed_jobs_pw(JOB_QUERY, LOCATION, cookies, JOBS_TO_SCRAPE)
-    sent = send_new_jobs(conn, jobs)
-    log.info("Sent %d jobs on startup", sent)
-    log.info("Polling Telegram for /test command")
+async def send_job(job):
+    jk, title, url = job
+    text = f"💼 <b>{title}</b>\n🔗 {url}"
+    markup = types.InlineKeyboardMarkup()
+    markup.add(types.InlineKeyboardButton("✅ Accept", callback_data=f"accept_{jk}"))
+    markup.add(types.InlineKeyboardButton("❌ Decline", callback_data=f"decline_{jk}"))
+    await bot.send_message(CHAT_ID, text, reply_markup=markup, parse_mode="HTML")
+    mark_sent(jk)
+
+async def scheduled_send():
     while True:
-        resp = None
-        try:
-            import requests
-            resp = requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates", params={"timeout":20, "offset":offset}, timeout=25).json()
-        except Exception:
-            time.sleep(POLL_INTERVAL)
-            continue
-        if resp.get("ok"):
-            for upd in resp.get("result", []):
-                offset = upd["update_id"] + 1
-                msg = upd.get("message", {})
-                if msg.get("chat", {}).get("id") == int(TELEGRAM_CHAT_ID) and msg.get("text", "").strip().lower() == "/test":
-                    handle_test(conn, cookies)
-        time.sleep(POLL_INTERVAL)
+        now = datetime.now().strftime("%H:%M")
+        if now in SEND_TIMES:
+            log.info(f"Scheduled send at {now}")
+            jobs = scrape_jobs()
+            for job in jobs:
+                await send_job(job)
+            await asyncio.sleep(60)  # avoid duplicate sends
+        await asyncio.sleep(20)
 
+# Main
 if __name__ == "__main__":
-    main()
+    try:
+        init_db()
+        loop = asyncio.get_event_loop()
+        loop.create_task(scheduled_send())
+        executor.start_polling(dp, skip_updates=True)
+    except Exception:
+        log.error(traceback.format_exc())
+        sys.exit(1)
