@@ -25,6 +25,7 @@ JOBS_TO_SEND = 8
 DB_PATH = "jobs_sent.db"
 POLL_INTERVAL = 3
 ERROR_LOG_FILE = "job_bot_errors.log"
+COOKIES_FILE = "cookies.json"  # File to load cookies from
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     print("ERROR: TELEGRAM_TOKEN and TELEGRAM_CHAT_ID must be set.")
@@ -41,18 +42,16 @@ def init_db():
     return conn
 
 def load_playwright_cookies():
-    raw = os.getenv("COOKIE_JSON", "")
-    if not raw:
-        log.error("COOKIE_JSON env var empty. Put cookie JSON array or path to file there.")
+    if not os.path.isfile(COOKIES_FILE):
+        log.error(f"Cookies file '{COOKIES_FILE}' not found.")
         return []
     try:
-        cookies = json.loads(raw)
-    except json.JSONDecodeError:
-        if not os.path.isfile(raw):
-            log.error("COOKIE_JSON is not valid JSON or file path.")
-            return []
-        with open(raw, "r") as f:
+        with open(COOKIES_FILE, "r", encoding="utf-8") as f:
             cookies = json.load(f)
+    except Exception as e:
+        log.error(f"Failed to load cookies from '{COOKIES_FILE}': {e}")
+        return []
+
     sanitized = []
     for c in cookies:
         same_site = c.get("sameSite", "Lax")
